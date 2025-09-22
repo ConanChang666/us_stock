@@ -1,0 +1,91 @@
+# === Node.js / JavaScript ===
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+package-lock.json
+yarn.lock
+.pnpm-debug.log
+.npmrc
+
+# === 環境設定檔 ===
+.env
+.env.*
+!.env.example       # 但保留範例檔案
+!.env.sample
+!.env.example.local
+venv
+.venv
+
+# === 系統檔案 ===
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# === 建置輸出與暫存檔 ===
+dist/
+build/
+out/
+.next/
+.nuxt/
+.cache/
+.terraform/
+.tmp/
+coverage/
+*.log
+*.pid
+*.seed
+*.pid.lock
+
+# === IDE / 編輯器 ===
+.idea/
+.vscode/
+*.sublime-project
+*.sublime-workspace
+
+# === 測試與報告 ===
+coverage/
+lcov.info
+
+# === 資料庫檔案 ===
+*.sqlite
+*.sqlite3
+*.db
+*.db-journal
+
+# === Docker ===
+docker-compose.override.yml
+*.tar
+.docker/
+
+# === 前端相關 ===
+*.local
+*.cache/
+*.export/
+*.map
+public/static/
+
+# === Linux / Mac 系統檔 ===
+ehthumbs.db
+Icon?
+.AppleDouble
+.LSOverride
+
+# === 其他常見檔案 ===
+*.bak
+*.orig
+*.rej
+*.tmp
+*.temp
+*.log
+*.lock
+
+# === Python (若專案混合 Python) ===
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pytest_cache/
+*.python-version
