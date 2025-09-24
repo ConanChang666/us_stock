@@ -7,49 +7,45 @@ load_dotenv()
 from transformers import MarianMTModel, MarianTokenizer
 from db.MySQL_db_connection import MySQLConn
 from opencc import OpenCC
+import torch  # ← 新增
 
 DB = "stock_market_data_lake"
 TABLE = f"{DB}.us_stock_company_info_clean"
 
-# Hugging Face 模型：英文 -> 中文（多半為簡體）
 EN_ZH_MODEL = "Helsinki-NLP/opus-mt-en-zh"
 
 _tokenizer = None
 _model = None
-
-# OpenCC：簡體 -> 繁體（台灣用語）
-_opencc_s2twp = OpenCC("s2twp")  # Simplified -> Traditional (Taiwan phrases)
-
-
-# ---------------- 模型載入與轉換工具 ----------------
+_opencc_s2twp = OpenCC("s2twp")
 
 def load_model_once():
     global _tokenizer, _model
     if _tokenizer is None or _model is None:
-        print(f"[init] loading model: {EN_ZH_MODEL}")
+        print(f"[init] loading model: {EN_ZH_MODEL}", flush=True)
         _tokenizer = MarianTokenizer.from_pretrained(EN_ZH_MODEL)
         _model = MarianMTModel.from_pretrained(EN_ZH_MODEL)
-        print("[init] model loaded.")
+        print("[init] model loaded.", flush=True)
     return _tokenizer, _model
 
-
-def batch_translate_en_to_zh_cn(texts: List[str]) -> List[str]:
-    """
-    一次翻多句，輸出視為「簡體中文 zh_cn」。
-    """
+def batch_translate_en_to_zh_cn(texts: List[str], max_new_tokens: int = 256, debug: bool = False) -> List[str]:
     tok, mdl = load_model_once()
     if not texts:
         return []
-    inputs = tok(texts, return_tensors="pt", padding=True, truncation=True)
-    outputs = mdl.generate(**inputs)
-    results = [tok.decode(o, skip_special_tokens=True) for o in outputs]
-    return results
-
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    mdl.to(device)
+    if debug:
+        print(f"[debug] translate batch size={len(texts)}, device={device}, max_new_tokens={max_new_tokens}", flush=True)
+    with torch.no_grad():
+        inputs = tok(texts, return_tensors="pt", padding=True, truncation=True).to(device)
+        outputs = mdl.generate(
+            **inputs,
+            max_new_tokens=max_new_tokens,
+            num_beams=1,
+            do_sample=False
+        )
+    return [tok.decode(o, skip_special_tokens=True) for o in outputs]
 
 def to_zh_tw_from_zh_cn(texts: List[str]) -> List[str]:
-    """
-    簡體 -> 繁體（台灣用語）s2twp。
-    """
     return [_opencc_s2twp.convert(t) if t else t for t in texts]
 
 
@@ -178,43 +174,57 @@ def fetch_batch(only: str, limit: int, offset: int) -> Dict[str, List[Dict[str, 
 
 def main():
     ap = argparse.ArgumentParser(description="EN -> ZH(zh_cn -> zh_tw) for name/description")
-    ap.add_argument("--limit", type=int, default=200, help="Rows per batch for each type")
+    ap.add_argument("--limit", type=int, default=10, help="Rows per batch for each type")  # ← 改成預設10，比較快驗證
     ap.add_argument("--offset", type=int, default=0, help="Offset per type")
     ap.add_argument("--only", choices=["name", "description", "both"], default="both",
                     help="Translate only 'name', only 'description', or 'both'")
     ap.add_argument("--dry-run", action="store_true", help="Print only, do not write DB")
+    ap.add_argument("--debug", action="store_true", help="Verbose logging")                # ← 新增
+    ap.add_argument("--max-new-tokens", type=int, default=128, help="Limit generation length")  # ← 新增
     args = ap.parse_args()
 
     name_cnt, desc_cnt = count_candidates(args.only)
-    print(f"[info] candidates -> name: {name_cnt}, description: {desc_cnt}")
+    print(f"[info] candidates -> name: {name_cnt}, description: {desc_cnt}", flush=True)
 
     # --- names ---
     if args.only in ("both", "name") and name_cnt > 0:
         processed = 0
         offset = args.offset
         while processed < name_cnt:
+            print(f"[stage] fetching name batch: limit={args.limit} offset={offset}", flush=True)
             rows = fetch_batch("name", args.limit, offset)["name"]
             if not rows:
+                print("[stage] no more rows for name", flush=True)
                 break
 
             sids = [r["stock_id"] for r in rows]
             texts_en = [r["name_en"] or "" for r in rows]
+            if args.debug:
+                print(f"[debug] fetched rows={len(rows)}; first_id={sids[0] if sids else None}", flush=True)
 
-            # (1) 英 -> 簡 (zh_cn)
-            zh_cn_list = batch_translate_en_to_zh_cn(texts_en)
-            # (2) 簡 -> 繁（台灣）(zh_tw)
+            print("[stage] translating en -> zh_cn ...", flush=True)
+            zh_cn_list = batch_translate_en_to_zh_cn(texts_en, max_new_tokens=args.max_new_tokens, debug=args.debug)
+            print("[stage] converting zh_cn -> zh_tw (s2twp) ...", flush=True)
             zh_tw_list = to_zh_tw_from_zh_cn(zh_cn_list)
 
-            updates = list(zip(zh_tw_list, zh_cn_list, sids))  # 順序: (tw, cn, id)
+            updates = list(zip(zh_tw_list, zh_cn_list, sids))  # (tw, cn, id)
 
-            for sid, en, tw, cn in zip(sids, texts_en, zh_tw_list, zh_cn_list):
-                print(f"[name] {sid}: {en[:40]}... -> tw:{tw[:40]}... / cn:{cn[:40]}...")
+            preview_n = min(3, len(rows))
+            for sid, en, tw, cn in list(zip(sids, texts_en, zh_tw_list, zh_cn_list))[:preview_n]:
+                print(f"[preview][name] {sid}: EN:{en[:40]} | TW:{tw[:40]} | CN:{cn[:40]}", flush=True)
 
             if not args.dry_run and updates:
-                with MySQLConn(DB) as conn, conn.cursor() as cur:
-                    cur.executemany(SQL_UPDATE_NAME, updates)
-                    conn.commit()
-                print(f"[name] updated {len(updates)} rows.")
+                print(f"[stage] DB UPDATE name... rows={len(updates)}", flush=True)
+                try:
+                    with MySQLConn(DB) as conn, conn.cursor() as cur:
+                        cur.executemany(SQL_UPDATE_NAME, updates)
+                        conn.commit()
+                    print(f"[name] updated {len(updates)} rows (COMMIT OK).", flush=True)
+                except Exception as e:
+                    print(f"[error] DB update(name) failed: {repr(e)}", flush=True)
+                    # raise  # 需要中斷就打開
+            else:
+                print("[stage] dry-run=True or no updates; skip DB write.", flush=True)
 
             processed += len(rows)
             offset += len(rows)
@@ -224,34 +234,45 @@ def main():
         processed = 0
         offset = args.offset
         while processed < desc_cnt:
+            print(f"[stage] fetching desc batch: limit={args.limit} offset={offset}", flush=True)
             rows = fetch_batch("description", args.limit, offset)["description"]
             if not rows:
+                print("[stage] no more rows for description", flush=True)
                 break
 
             sids = [r["stock_id"] for r in rows]
             texts_en = [r["desc_en"] or "" for r in rows]
+            if args.debug:
+                print(f"[debug] fetched rows={len(rows)}; first_id={sids[0] if sids else None}", flush=True)
 
-            # (1) 英 -> 簡 (zh_cn)
-            zh_cn_list = batch_translate_en_to_zh_cn(texts_en)
-            # (2) 簡 -> 繁（台灣）(zh_tw)
+            print("[stage] translating en -> zh_cn ...", flush=True)
+            zh_cn_list = batch_translate_en_to_zh_cn(texts_en, max_new_tokens=args.max_new_tokens, debug=args.debug)
+            print("[stage] converting zh_cn -> zh_tw (s2twp) ...", flush=True)
             zh_tw_list = to_zh_tw_from_zh_cn(zh_cn_list)
 
-            updates = list(zip(zh_tw_list, zh_cn_list, sids))  # 順序: (tw, cn, id)
+            updates = list(zip(zh_tw_list, zh_cn_list, sids))  # (tw, cn, id)
 
-            for sid, en, tw, cn in zip(sids, texts_en, zh_tw_list, zh_cn_list):
-                print(f"[desc] {sid}: {en[:40]}... -> tw:{tw[:40]}... / cn:{cn[:40]}...")
+            preview_n = min(3, len(rows))
+            for sid, en, tw, cn in list(zip(sids, texts_en, zh_tw_list, zh_cn_list))[:preview_n]:
+                print(f"[preview][desc] {sid}: EN:{en[:40]} | TW:{tw[:40]} | CN:{cn[:40]}", flush=True)
 
             if not args.dry_run and updates:
-                with MySQLConn(DB) as conn, conn.cursor() as cur:
-                    cur.executemany(SQL_UPDATE_DESC, updates)
-                    conn.commit()
-                print(f"[desc] updated {len(updates)} rows.")
+                print(f"[stage] DB UPDATE desc... rows={len(updates)}", flush=True)
+                try:
+                    with MySQLConn(DB) as conn, conn.cursor() as cur:
+                        cur.executemany(SQL_UPDATE_DESC, updates)
+                        conn.commit()
+                    print(f"[desc] updated {len(updates)} rows (COMMIT OK).", flush=True)
+                except Exception as e:
+                    print(f"[error] DB update(desc) failed: {repr(e)}", flush=True)
+                    # raise
+            else:
+                print("[stage] dry-run=True or no updates; skip DB write.", flush=True)
 
             processed += len(rows)
             offset += len(rows)
 
-    print("[done] all tasks finished.")
-
+    print("[done] all tasks finished.", flush=True)
 
 if __name__ == "__main__":
     main()
