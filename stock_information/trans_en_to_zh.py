@@ -188,89 +188,49 @@ def main():
 
     # --- names ---
     if args.only in ("both", "name") and name_cnt > 0:
-        processed = 0
-        offset = args.offset
-        while processed < name_cnt:
-            print(f"[stage] fetching name batch: limit={args.limit} offset={offset}", flush=True)
-            rows = fetch_batch("name", args.limit, offset)["name"]
+        while True:
+            rows = fetch_batch("name", args.limit, 0)["name"]  # ← 固定用 OFFSET 0
             if not rows:
-                print("[stage] no more rows for name", flush=True)
                 break
 
             sids = [r["stock_id"] for r in rows]
             texts_en = [r["name_en"] or "" for r in rows]
-            if args.debug:
-                print(f"[debug] fetched rows={len(rows)}; first_id={sids[0] if sids else None}", flush=True)
 
-            print("[stage] translating en -> zh_cn ...", flush=True)
-            zh_cn_list = batch_translate_en_to_zh_cn(texts_en, max_new_tokens=args.max_new_tokens, debug=args.debug)
-            print("[stage] converting zh_cn -> zh_tw (s2twp) ...", flush=True)
+            zh_cn_list = batch_translate_en_to_zh_cn(texts_en)
             zh_tw_list = to_zh_tw_from_zh_cn(zh_cn_list)
 
             updates = list(zip(zh_tw_list, zh_cn_list, sids))  # (tw, cn, id)
 
-            preview_n = min(3, len(rows))
-            for sid, en, tw, cn in list(zip(sids, texts_en, zh_tw_list, zh_cn_list))[:preview_n]:
-                print(f"[preview][name] {sid}: EN:{en[:40]} | TW:{tw[:40]} | CN:{cn[:40]}", flush=True)
-
             if not args.dry_run and updates:
-                print(f"[stage] DB UPDATE name... rows={len(updates)}", flush=True)
-                try:
-                    with MySQLConn(DB) as conn, conn.cursor() as cur:
-                        cur.executemany(SQL_UPDATE_NAME, updates)
-                        conn.commit()
-                    print(f"[name] updated {len(updates)} rows (COMMIT OK).", flush=True)
-                except Exception as e:
-                    print(f"[error] DB update(name) failed: {repr(e)}", flush=True)
-                    # raise  # 需要中斷就打開
+                with MySQLConn(DB) as conn, conn.cursor() as cur:
+                    cur.executemany(SQL_UPDATE_NAME, updates)
+                    conn.commit()
+                print(f"[name] updated {len(updates)} rows.")
             else:
-                print("[stage] dry-run=True or no updates; skip DB write.", flush=True)
-
-            processed += len(rows)
-            offset += len(rows)
+                print("[stage] dry-run=True or no updates; skip DB write.")
 
     # --- descriptions ---
     if args.only in ("both", "description") and desc_cnt > 0:
-        processed = 0
-        offset = args.offset
-        while processed < desc_cnt:
-            print(f"[stage] fetching desc batch: limit={args.limit} offset={offset}", flush=True)
-            rows = fetch_batch("description", args.limit, offset)["description"]
+        while True:
+            rows = fetch_batch("description", args.limit, 0)["description"]  # ← 固定用 OFFSET 0
             if not rows:
-                print("[stage] no more rows for description", flush=True)
                 break
 
             sids = [r["stock_id"] for r in rows]
             texts_en = [r["desc_en"] or "" for r in rows]
-            if args.debug:
-                print(f"[debug] fetched rows={len(rows)}; first_id={sids[0] if sids else None}", flush=True)
 
-            print("[stage] translating en -> zh_cn ...", flush=True)
-            zh_cn_list = batch_translate_en_to_zh_cn(texts_en, max_new_tokens=args.max_new_tokens, debug=args.debug)
-            print("[stage] converting zh_cn -> zh_tw (s2twp) ...", flush=True)
+            zh_cn_list = batch_translate_en_to_zh_cn(texts_en)
             zh_tw_list = to_zh_tw_from_zh_cn(zh_cn_list)
 
             updates = list(zip(zh_tw_list, zh_cn_list, sids))  # (tw, cn, id)
 
-            preview_n = min(3, len(rows))
-            for sid, en, tw, cn in list(zip(sids, texts_en, zh_tw_list, zh_cn_list))[:preview_n]:
-                print(f"[preview][desc] {sid}: EN:{en[:40]} | TW:{tw[:40]} | CN:{cn[:40]}", flush=True)
-
             if not args.dry_run and updates:
-                print(f"[stage] DB UPDATE desc... rows={len(updates)}", flush=True)
-                try:
-                    with MySQLConn(DB) as conn, conn.cursor() as cur:
-                        cur.executemany(SQL_UPDATE_DESC, updates)
-                        conn.commit()
-                    print(f"[desc] updated {len(updates)} rows (COMMIT OK).", flush=True)
-                except Exception as e:
-                    print(f"[error] DB update(desc) failed: {repr(e)}", flush=True)
-                    # raise
+                with MySQLConn(DB) as conn, conn.cursor() as cur:
+                    cur.executemany(SQL_UPDATE_DESC, updates)
+                    conn.commit()
+                print(f"[desc] updated {len(updates)} rows.")
             else:
-                print("[stage] dry-run=True or no updates; skip DB write.", flush=True)
-
-            processed += len(rows)
-            offset += len(rows)
+                print("[stage] dry-run=True or no updates; skip DB write.")
 
     print("[done] all tasks finished.", flush=True)
 
